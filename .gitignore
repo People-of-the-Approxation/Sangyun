@@ -1,0 +1,17 @@
+.vscode/
+*__pycache__/
+*Project/
+*.log
+*.jou
+*.str
+*.xml
+*.wcfg
+*.tcl
+*.cache/
+*.hw/
+*.ip_user_files/
+*.sim/
+*.runs/
+*.xpr
+*.pdf
+*.srcs
