@@ -1,6 +1,6 @@
 `timescale 1ns / 1ps
 
-module tb_pwl_approx_burst;
+module tb_pwl_approx;
 
     // =================================================================
     // 1. Signal Declaration
