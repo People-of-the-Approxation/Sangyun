@@ -2,14 +2,9 @@
 
 module tb_ln_topmodule;
 
-    // =================================================================
-    // [중요] Typedef는 모듈 최상단에 선언해야 합니다.
-    // =================================================================
     typedef logic signed [15:0] array_t [0:63];
 
-    // =================================================================
     // 1. Signal Declaration
-    // =================================================================
     reg           i_clk;
     reg           i_en;
     reg           i_rst;
@@ -23,9 +18,7 @@ module tb_ln_topmodule;
     array_t       input_q[$]; 
     int           error_count = 0;
 
-    // =================================================================
     // 2. DUT Instantiation (Top Module)
-    // =================================================================
     ln_topmodule dut (
         .i_clk         (i_clk),
         .i_en          (i_en),
@@ -36,17 +29,13 @@ module tb_ln_topmodule;
         .o_result_flat (o_result_flat)
     );
 
-    // =================================================================
     // 3. Clock Generation
-    // =================================================================
     initial begin
         i_clk = 0;
         forever #5 i_clk = ~i_clk;
     end
 
-    // =================================================================
     // 4. Test Stimulus
-    // =================================================================
     initial begin
         i_en = 1;
         i_rst = 1;
@@ -65,10 +54,8 @@ module tb_ln_topmodule;
             send_packet_random();
         end
         
-        // [수정] 마지막 패킷이 들어갈 수 있도록 1클럭 기다려줌!
         @(posedge i_clk); 
 
-        // Pipeline Flush Wait
         i_valid = 0;
         #1000;
 
@@ -81,12 +68,9 @@ module tb_ln_topmodule;
         $finish;
     end
 
-    // =================================================================
     // 5. Tasks
-    // =================================================================
     task send_packet_random();
         array_t temp_arr;
-        // 범위 +/- 100 유지 (Scaling 문제 해결용)
         for(int k=0; k<64; k++) begin
             temp_arr[k] = $urandom_range(0, 200) - 100; 
         end
@@ -102,20 +86,12 @@ module tb_ln_topmodule;
         end
     endtask
 
-    // =================================================================
-    // [핵심 변경] 파형 디버깅용 실시간 Unpacking
-    // =================================================================
-    // always @(posedge i_clk) 밖으로 뺐습니다!
-    // 이제 o_result_flat이 변하면 output_hw_array도 즉시 변합니다.
     always_comb begin
         for(int k=0; k<64; k++) begin
             output_hw_array[k] = o_result_flat[16*k +: 16];
         end
     end
 
-    // =================================================================
-    // 6. Monitor & Checker
-    // =================================================================
     always @(posedge i_clk) begin
         if (!i_rst && o_valid) begin
             array_t original_input;
@@ -126,16 +102,11 @@ module tb_ln_topmodule;
                 $display("[Error] o_valid asserted without input data!");
                 $finish;
             end
-
-            // [삭제] 여기서 Unpacking 하던 루프는 위쪽 always_comb로 이동했습니다.
             
             check_result(original_input, output_hw_array);
         end
     end
 
-    // =================================================================
-    // 7. Verification Function
-    // =================================================================
     function automatic void check_result(input array_t in_data, input array_t hw_out);
         real sum_x = 0;
         real sum_sq = 0;
@@ -143,10 +114,8 @@ module tb_ln_topmodule;
         real expected_float;
         real actual_float;
         
-        // Scaling Factor 91.2 적용
         real scaling_factor = 91.2; 
 
-        // A. 평균, 분산 계산
         for(int k=0; k<64; k++) begin
             sum_x += in_data[k];
             sum_sq += real'(in_data[k]) * real'(in_data[k]);
@@ -156,11 +125,9 @@ module tb_ln_topmodule;
         calc_var = (sum_sq / 64.0) - (mean * mean);
         if (calc_var < 0.001) calc_var = 0; 
 
-        // B. 역제곱근 계산
         if (calc_var == 0) inv_sqrt = 0;
         else               inv_sqrt = 1.0 / $sqrt(calc_var); 
 
-        // C. 비교 및 로그 출력
         for(int k=0; k<64; k++) begin
             expected_float = (real'(in_data[k]) - mean) * inv_sqrt * scaling_factor;
             actual_float = real'(hw_out[k]); 
