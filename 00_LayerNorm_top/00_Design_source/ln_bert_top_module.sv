@@ -110,48 +110,107 @@ module ln_bert_top_module (
     // =============================================================
     // 6. Stage 4: Normalize (Old Stage 3)
     // =============================================================
-    // Stage 3 완료 시 레지스터 캡처 (Timing Buffer)
-    reg [3:0] r_gamma_addr_delay [0:7]; // Depth = 7
-    integer d;
+
+    // Stage 3 결과( mean / inv_sqrt / bank ) 캡처
+    reg signed [31:0] s4_mean_reg;
+    reg signed [16:0] s4_inv_sqrt_reg;
+    reg [1:0]         s4_bank_reg;
+
+    // -------------------------------------------------------------
+    // Normalize burst scheduler
+    //  - Stage3(o_valid)에서 mean/inv_sqrt가 준비되면,
+    //    해당 bank의 입력 12개 chunk(cycle 0~11)를 순서대로 Stage4에 공급
+    // -------------------------------------------------------------
+    reg               norm_active;
+    reg [3:0]         norm_cycle;
+    reg [1:0]         norm_bank;
+
+    // (옵션) 혹시라도 Stage3 valid가 겹칠 때를 대비한 1-entry pending
+    reg               pend_valid;
+    reg signed [31:0] pend_mean;
+    reg signed [16:0] pend_inv_sqrt;
+    reg [1:0]         pend_bank;
 
     always @(posedge i_clk) begin
-        if (i_en) begin
-            // 1. 현재 cycle_cnt를 파이프라인 입구에 넣음
-            r_gamma_addr_delay[0] <= cycle_cnt;
+        if (i_rst) begin
+            s4_mean_reg      <= '0;
+            s4_inv_sqrt_reg  <= '0;
+            s4_bank_reg      <= '0;
 
-            // 2. 한 칸씩 옆으로 전달 (Shift)
-            for (d=0; d<7; d=d+1) begin
-                r_gamma_addr_delay[d+1] <= r_gamma_addr_delay[d];
+            norm_active      <= 1'b0;
+            norm_cycle       <= 4'd0;
+            norm_bank        <= 2'd0;
+
+            pend_valid       <= 1'b0;
+            pend_mean        <= '0;
+            pend_inv_sqrt    <= '0;
+            pend_bank        <= 2'd0;
+        end else if (i_en) begin
+            // 1) Burst 진행
+            if (norm_active) begin
+                if (norm_cycle == 4'd11) begin
+                    norm_active <= 1'b0;
+                    norm_cycle  <= 4'd0;
+                end else begin
+                    norm_cycle  <= norm_cycle + 4'd1;
+                end
+            end
+
+            // 2) Stage3 결과 수신
+            if (s3_valid) begin
+                // 현재 burst가 비어있거나(비활성), 마지막 cycle(11)에서 끝나는 타이밍이면 즉시 시작
+                if (!norm_active || (norm_active && (norm_cycle == 4'd11))) begin
+                    s4_mean_reg     <= s3_mean;
+                    s4_inv_sqrt_reg <= {1'b0, s3_inv_sqrt};
+                    s4_bank_reg     <= s3_bank;
+
+                    norm_active <= 1'b1;
+                    norm_cycle  <= 4'd0;
+                    norm_bank   <= s3_bank;
+
+                    pend_valid  <= 1'b0; // 덮어쓰는 경우 pending은 비움
+                end else begin
+                    // 아니면 pending에 저장 (겹침 방지)
+                    pend_valid    <= 1'b1;
+                    pend_mean     <= s3_mean;
+                    pend_inv_sqrt <= {1'b0, s3_inv_sqrt};
+                    pend_bank     <= s3_bank;
+                end
+            end
+
+            // 3) Burst가 끝났고 pending이 있으면 다음 bank를 바로 시작
+            if (!norm_active && pend_valid) begin
+                s4_mean_reg     <= pend_mean;
+                s4_inv_sqrt_reg <= pend_inv_sqrt;
+                s4_bank_reg     <= pend_bank;
+
+                norm_active <= 1'b1;
+                norm_cycle  <= 4'd0;
+                norm_bank   <= pend_bank;
+
+                pend_valid  <= 1'b0;
             end
         end
     end
 
-    // 7클럭 지연된 주소 (이걸 ROM 읽을 때 사용!)
-    wire [3:0] w_delayed_cycle_cnt = r_gamma_addr_delay[7];
-    
-    reg signed [31:0] s4_mean_reg;
-    reg signed [16:0] s4_inv_sqrt_reg;
-    reg [1:0]         s4_active_bank;
-    
-    always @(posedge i_clk) begin
-        if (s3_valid) begin
-            s4_mean_reg     <= s3_mean;
-            s4_inv_sqrt_reg <= {1'b0, s3_inv_sqrt};
-            s4_active_bank  <= s3_bank;
-        end
-    end
+    // Stage4는 "Stage3 결과가 준비된 bank"에 대해서만 돌립니다.
+    wire        s4_fire   = i_en & norm_active;
+    wire [5:0]  s4_in_tag = {norm_bank, norm_cycle}; // Bank + Chunk(Cycle)
 
-    wire [5:0] s4_in_tag = {s4_active_bank, cycle_cnt}; // Bank + Cycle
     wire [5:0] s4_out_tag;
     wire [1023:0] s4_res_data;
     wire s4_res_valid;
 
     ln_stage4_normalize u_stage4 (
-        .i_clk(i_clk), .i_en(i_en), .i_valid_trigger(i_en),
+        .i_clk(i_clk), .i_en(i_en), .i_valid_trigger(s4_fire),
         .i_addr(s4_in_tag),
         .i_mean(s4_mean_reg), .i_inv_sqrt(s4_inv_sqrt_reg),
-        .i_raw_data_flat(input_bram[s4_active_bank][cycle_cnt]),
-        .i_gamma_flat(rom_gamma_flat[w_delayed_cycle_cnt]), .i_beta_flat(rom_beta_flat[w_delayed_cycle_cnt]),
+
+        // [핵심 수정] cycle_cnt가 아니라, burst counter(norm_cycle)로 0~11을 순회
+        .i_raw_data_flat(input_bram[norm_bank][norm_cycle]),
+        .i_gamma_flat(rom_gamma_flat[norm_cycle]),
+        .i_beta_flat(rom_beta_flat[norm_cycle]),
+
         .o_res_data_flat(s4_res_data), .o_res_valid(s4_res_valid), .o_res_addr(s4_out_tag)
     );
 
