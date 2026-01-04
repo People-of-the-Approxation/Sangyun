@@ -1,0 +1,7 @@
+URL addr : http://localhost:8000/attention_ui
+
+pip 설치
+python -m pip install fastapi uvicorn python-multipart
+python -m pip install torch transformers datasets
+python -m pip install numpy matplotlib
+python -m pip install pyserial
