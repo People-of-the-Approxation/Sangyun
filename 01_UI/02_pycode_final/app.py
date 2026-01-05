@@ -1,5 +1,7 @@
+# app.py
 import io
 import uuid
+
 import numpy as np
 
 import matplotlib
@@ -11,8 +13,10 @@ from matplotlib.colors import LinearSegmentedColormap, ListedColormap, BoundaryN
 
 from fastapi import FastAPI, Form
 from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles  # ✅ 추가
 
-import ui
+import ui  # ✅ page2(결과 페이지) 유지용
+import ui_page1  # ✅ page1(디자인 UI)용
 import verify
 
 # =========================
@@ -26,6 +30,11 @@ ATTN_STORE = {}
 
 app = FastAPI()
 
+# ✅ static 폴더 서빙 (CSS/이미지)
+# project/static/style.css
+# project/static/images/chip_icon.png
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
 
 # =========================
 # Pages
@@ -37,16 +46,22 @@ def root():
 
 @app.get("/attention_ui", response_class=HTMLResponse)
 def attention_ui():
-    return HTMLResponse(ui.render_attention_ui(DEFAULT_PORT, DEFAULT_BAUD))
+    return HTMLResponse(
+        ui_page1.render_page1(
+            model="gpt",
+            port=DEFAULT_PORT,
+            mode="hw",  # ← 소문자로
+        )
+    )
 
 
 @app.post("/attention_generate", response_class=HTMLResponse)
 def attention_generate(
     text: str = Form(...),
     mode: str = Form("hw"),
-    layer: int = Form(0),
-    head: int = Form(0),
-    max_len: int = Form(128),
+    layer: int = Form(6),
+    head: int = Form(6),
+    max_len: int = Form(512),
     port: str = Form(DEFAULT_PORT),
     baud: int = Form(DEFAULT_BAUD),
 ):
@@ -143,11 +158,17 @@ def attention_generate(
     # 비교 표시
     sw_line = "N/A"
     if pred_sw is not None:
-        sw_line = f"{pred_sw['pred_label']} (Ppos={pred_sw['p_pos']:.3f}, Pneg={pred_sw['p_neg']:.3f})"
+        sw_line = (
+            f"{pred_sw['pred_label']} "
+            f"(Ppos={pred_sw['p_pos']:.3f}, Pneg={pred_sw['p_neg']:.3f})"
+        )
 
     hw_line = "N/A"
     if pred_hw is not None:
-        hw_line = f"{pred_hw['pred_label']} (Ppos={pred_hw['p_pos']:.3f}, Pneg={pred_hw['p_neg']:.3f})"
+        hw_line = (
+            f"{pred_hw['pred_label']} "
+            f"(Ppos={pred_hw['p_pos']:.3f}, Pneg={pred_hw['p_neg']:.3f})"
+        )
 
     match_line = "N/A"
     if (pred_sw is not None) and (pred_hw is not None):
@@ -177,6 +198,7 @@ def attention_generate(
         </div>
         """
 
+    # ✅ page2는 ui.py의 render_result_page 그대로 사용(유지)
     return HTMLResponse(
         ui.render_result_page(
             used_mode=used_mode,
