@@ -12,11 +12,12 @@ from matplotlib import colors as mcolors
 from matplotlib.colors import LinearSegmentedColormap, ListedColormap, BoundaryNorm
 
 from fastapi import FastAPI, Form
-from fastapi.responses import HTMLResponse, StreamingResponse
-from fastapi.staticfiles import StaticFiles  # ✅ 추가
+from fastapi.responses import HTMLResponse, StreamingResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 import ui_main_page
-import ui_bert_page
+import ui_gpt_page as ui
+import ui_bert_page  # ✅ BERT 결과 페이지(ui_bert_page.py)
 import verify
 
 # =========================
@@ -25,51 +26,116 @@ import verify
 DEFAULT_PORT = "COM3"
 DEFAULT_BAUD = 115200
 
-# id -> {"tokens": [...], "attn": np.ndarray(T,T), "meta": {...}}
+# BERT heatmap store (id -> dict)
 ATTN_STORE = {}
 
 app = FastAPI()
 
-# ✅ static 폴더 서빙 (CSS/이미지)
+# static 폴더 서빙 (CSS/이미지)
 # project/static/style.css
 # project/static/images/chip_icon.png
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
 # =========================
-# Pages
+# UI Page (ONLY ONE)
 # =========================
 @app.get("/", response_class=HTMLResponse)
 def root():
-    return HTMLResponse(ui.render_root())
+    # 별도 main page 제거: 기존 UI로 바로 보내기
+    return RedirectResponse(url="/attention_ui")
 
 
 @app.get("/attention_ui", response_class=HTMLResponse)
-def attention_ui():
+def attention_ui(
+    model: str = "gpt",
+    port: str = DEFAULT_PORT,
+    mode: str = "hw",
+):
+    # 기존 UI 그대로: model 토글 포함
     return HTMLResponse(
-        ui_page1.render_page1(
-            model="gpt",
-            port=DEFAULT_PORT,
-            mode="hw",  # ← 소문자로
+        ui_main_page.render_page1(
+            model=model,
+            port=port,
+            mode=mode,
         )
     )
 
 
+# =========================
+# Helpers
+# =========================
+def _run_gpt_demo(text: str, port: str, baud: int):
+    """
+    verify.py의 GPT 데모 함수 호출.
+    기대 반환: (sw_text, hw_text, attn_np, hw_error_str_or_None)
+    """
+    candidates = [
+        "run_gpt_demo",
+        "gpt_demo",
+        "compute_gpt_all",
+        "compute_gpt_demo",
+    ]
+    for fn_name in candidates:
+        if hasattr(verify, fn_name):
+            fn = getattr(verify, fn_name)
+            return fn(text=text, port=port, baud=baud)
+
+    raise RuntimeError(
+        "GPT mode selected, but verify.py does not provide a GPT demo function.\n"
+        "Expected one of: run_gpt_demo / gpt_demo / compute_gpt_all / compute_gpt_demo\n"
+        "Please add a function that returns (sw_text, hw_text, attn_np, hw_error_or_None)."
+    )
+
+
+# =========================
+# Generate (Model-dependent Result Page)
+# =========================
 @app.post("/attention_generate", response_class=HTMLResponse)
 def attention_generate(
     text: str = Form(...),
+    model: str = Form("gpt"),
     mode: str = Form("hw"),
-    layer: int = Form(6),
-    head: int = Form(6),
-    max_len: int = Form(512),
+    layer: int = Form(0),
+    head: int = Form(0),
+    max_len: int = Form(128),
     port: str = Form(DEFAULT_PORT),
     baud: int = Form(DEFAULT_BAUD),
 ):
+    model = (model or "gpt").lower().strip()
+
+    # -----------------------------
+    # 1) GPT: generation result page (ui.py)
+    # -----------------------------
+    if model == "gpt":
+        try:
+            sw_text, hw_text, attn_np, hw_err = _run_gpt_demo(
+                text=text, port=port, baud=int(baud)
+            )
+        except Exception as e:
+            sw_text, hw_text = "", ""
+            attn_np = np.zeros((1, 1), dtype=np.float32)
+            hw_err = str(e)
+
+        heatmap_b64 = ui._attn_to_png_base64(np.asarray(attn_np, dtype=np.float32))
+
+        return HTMLResponse(
+            ui.render_result_page(
+                input_text=text,
+                sw_text=sw_text,
+                hw_text=hw_text,
+                heatmap_png_b64=heatmap_b64,
+                error_hw=hw_err,
+            )
+        )
+
+    # -----------------------------
+    # 2) BERT: classification + match + heatmap page
+    # -----------------------------
     mode = (mode or "hw").lower().strip()
     if mode not in ("sw", "hw", "auto"):
         mode = "hw"
 
-    # SW 분류는 항상 해두자 (비교용)
     pred_sw = None
     pred_sw_err = None
     try:
@@ -85,9 +151,6 @@ def attention_generate(
     pred_hw_err = None
     auto_fallback_err = None
 
-    # ======================
-    # Heatmap source 선택
-    # ======================
     if mode == "sw":
         tokens, attn, _pred = verify.compute_sw_all(
             text, layer=layer, head=head, max_len=int(max_len)
@@ -107,7 +170,7 @@ def attention_generate(
             used_mode = "hw"
         except Exception as e:
             pred_hw_err = str(e)
-            # HW 강제 모드에서 HW 실패하면: 그래도 SW heatmap 보여주게 처리(사용자 경험)
+            # HW 강제 모드에서 HW 실패하면 SW heatmap이라도 보여주기
             tokens, attn, _pred = verify.compute_sw_all(
                 text, layer=layer, head=head, max_len=int(max_len)
             )
@@ -133,11 +196,11 @@ def attention_generate(
             )
             used_mode = "sw"
 
-    # 저장
+    attn = np.asarray(attn, dtype=np.float64)
     attn_id = str(uuid.uuid4())
     ATTN_STORE[attn_id] = {
         "tokens": tokens,
-        "attn": np.asarray(attn, dtype=np.float64),
+        "attn": attn,
         "meta": {
             "mode": used_mode,
             "layer": int(layer),
@@ -145,17 +208,11 @@ def attention_generate(
             "max_len": int(max_len),
             "port": port,
             "baud": int(baud),
-            "auto_fallback_err": auto_fallback_err,
-            "pred_hw_err": pred_hw_err,
-            "pred_sw_err": pred_sw_err,
-            "pred_sw": pred_sw,
-            "pred_hw": pred_hw,
         },
     }
 
     T = int(attn.shape[0])
 
-    # 비교 표시
     sw_line = "N/A"
     if pred_sw is not None:
         sw_line = (
@@ -174,7 +231,6 @@ def attention_generate(
     if (pred_sw is not None) and (pred_hw is not None):
         match_line = "O" if pred_sw["pred_id"] == pred_hw["pred_id"] else "X"
 
-    # 에러 블록
     err_blocks = ""
     if auto_fallback_err:
         err_blocks += f"""
@@ -198,9 +254,8 @@ def attention_generate(
         </div>
         """
 
-    # ✅ page2는 ui.py의 render_result_page 그대로 사용(유지)
     return HTMLResponse(
-        ui.render_result_page(
+        ui_bert_page.render_bert_result_page(
             used_mode=used_mode,
             layer=int(layer),
             head=int(head),
@@ -215,7 +270,7 @@ def attention_generate(
 
 
 # =========================
-# Heatmap Image
+# BERT Heatmap Image
 # =========================
 @app.get("/attn_heatmap.png")
 def attn_heatmap_png(id: str):
@@ -231,11 +286,7 @@ def attn_heatmap_png(id: str):
     fig = plt.figure(figsize=(8, 8))
     ax = fig.add_subplot(111)
 
-    # ==========================================
-    # 12-step palette: add more LIGHT shades
-    # - keep first(#F6EAE8) and last(#A84121)
-    # - densify the light region (base_colors[:5] -> 7 steps)
-    # ==========================================
+    # 12-step palette
     base_colors = [
         "#F6EAE8",
         "#F2CEBE",
@@ -249,14 +300,10 @@ def attn_heatmap_png(id: str):
         "#A84121",
     ]
 
-    # Light part (first 5 anchors) -> 7 colors
     light_cmap = LinearSegmentedColormap.from_list("light_part", base_colors[:5])
     light_colors = [mcolors.to_hex(light_cmap(i / 6)) for i in range(7)]  # 7
-
-    # Dark part (remaining 5 anchors) keep as-is
     dark_colors = base_colors[5:]  # 5
-
-    colors_12 = light_colors + dark_colors  # 12 total
+    colors_12 = light_colors + dark_colors
 
     bounds = np.linspace(0.0, 1.0, len(colors_12) + 1)
     cmap = ListedColormap(colors_12)
@@ -266,10 +313,9 @@ def attn_heatmap_png(id: str):
     fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
     ax.set_title(
-        f"Attention heatmap (mode={meta['mode']}, layer={meta['layer']}, head={meta['head']}, T={T})"
+        f"BERT Attention (mode={meta['mode']}, layer={meta['layer']}, head={meta['head']}, T={T})"
     )
 
-    # 토큰 라벨은 너무 길면 깨지므로 작을 때만 표시
     if T <= 40:
         ax.set_xticks(range(T))
         ax.set_yticks(range(T))

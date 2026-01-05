@@ -1,4 +1,4 @@
-# ui_page1.py
+# ui_main_page.py
 
 
 def render_page1(
@@ -15,7 +15,7 @@ def render_page1(
       <head>
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <title>Main Page</title>
+        <title>Main UI</title>
         <link rel="stylesheet" href="/static/style.css" />
       </head>
 
