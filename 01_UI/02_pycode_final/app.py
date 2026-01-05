@@ -1,4 +1,3 @@
-# app.py
 import io
 import uuid
 import numpy as np
@@ -7,6 +6,8 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib import colors as mcolors
+from matplotlib.colors import LinearSegmentedColormap, ListedColormap, BoundaryNorm
 
 from fastapi import FastAPI, Form
 from fastapi.responses import HTMLResponse, StreamingResponse
@@ -36,7 +37,6 @@ def root():
 
 @app.get("/attention_ui", response_class=HTMLResponse)
 def attention_ui():
-    # 기본 mode를 HW로 설정
     return HTMLResponse(ui.render_attention_ui(DEFAULT_PORT, DEFAULT_BAUD))
 
 
@@ -192,6 +192,9 @@ def attention_generate(
     )
 
 
+# =========================
+# Heatmap Image
+# =========================
 @app.get("/attn_heatmap.png")
 def attn_heatmap_png(id: str):
     if id not in ATTN_STORE:
@@ -205,7 +208,41 @@ def attn_heatmap_png(id: str):
 
     fig = plt.figure(figsize=(8, 8))
     ax = fig.add_subplot(111)
-    ax.imshow(attn, aspect="auto")
+
+    # ==========================================
+    # 12-step palette: add more LIGHT shades
+    # - keep first(#F6EAE8) and last(#A84121)
+    # - densify the light region (base_colors[:5] -> 7 steps)
+    # ==========================================
+    base_colors = [
+        "#F6EAE8",
+        "#F2CEBE",
+        "#ECAE96",
+        "#E7916F",
+        "#E47950",
+        "#E06338",
+        "#D85D34",
+        "#CB552E",
+        "#BD4E2A",
+        "#A84121",
+    ]
+
+    # Light part (first 5 anchors) -> 7 colors
+    light_cmap = LinearSegmentedColormap.from_list("light_part", base_colors[:5])
+    light_colors = [mcolors.to_hex(light_cmap(i / 6)) for i in range(7)]  # 7
+
+    # Dark part (remaining 5 anchors) keep as-is
+    dark_colors = base_colors[5:]  # 5
+
+    colors_12 = light_colors + dark_colors  # 12 total
+
+    bounds = np.linspace(0.0, 1.0, len(colors_12) + 1)
+    cmap = ListedColormap(colors_12)
+    norm = BoundaryNorm(bounds, cmap.N)
+
+    im = ax.imshow(attn, aspect="auto", cmap=cmap, norm=norm)
+    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
     ax.set_title(
         f"Attention heatmap (mode={meta['mode']}, layer={meta['layer']}, head={meta['head']}, T={T})"
     )
