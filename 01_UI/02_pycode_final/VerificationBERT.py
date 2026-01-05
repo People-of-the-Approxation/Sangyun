@@ -1,4 +1,3 @@
-# VerificationBERT.py
 from typing import Optional, Tuple
 import torch
 import numpy as np
