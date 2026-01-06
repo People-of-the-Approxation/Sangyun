@@ -18,9 +18,11 @@ except Exception as e:
 
 class GPT2AttentionSoftmaxApprox(GPT2Attention):
     """
-    Optimized GPT-2 Attention:
-    - Default: Uses fast PyTorch operations (GPU/CPU)
-    - HW Mode: Only converts Row 0 to NumPy for UART, keeps others in PyTorch
+    Optimized GPT-2 Attention (Hybrid):
+    - Default: Pure PyTorch attention (fast)
+    - HW Mode: Apply FPGA(UART) softmax ONLY on ONE selected layer
+      and ONLY on one row (row = Tq - 1, i.e., current token row).
+      By default, HW layer is `store_layer` (same as heatmap target layer).
     """
 
     def __init__(self, config, is_cross_attention=False, layer_idx=None):
@@ -36,10 +38,17 @@ class GPT2AttentionSoftmaxApprox(GPT2Attention):
         self.force_store_attn: bool = False
         self.pad_value = -32.0
 
-        # 저장 제어 플래그
+        # 저장 제어 플래그 (UI에서 layer/head 선택에 이미 사용 중)
         self.store_only: bool = False
         self.store_layer: int = 0
         self.store_head: int = 0
+
+        # HW 적용 제어 (기본은 store_layer를 HW layer로 재사용)
+        # 필요하면 나중에 별도 setter로 분리 가능
+        self.hw_only_one_layer: bool = True  # ✅ "레이어 1개만 HW" 옵션
+        self.hw_layer: int = (
+            0  # ✅ HW 적용 레이어 (기본값; set_store_target에서 동기화)
+        )
 
     def set_serial(self, ser):
         self.ser = ser
@@ -51,6 +60,9 @@ class GPT2AttentionSoftmaxApprox(GPT2Attention):
         self.store_only = bool(store_only)
         self.store_layer = int(layer)
         self.store_head = int(head)
+
+        # ✅ heatmap target layer를 HW layer로도 사용 (UI 연동 간단)
+        self.hw_layer = int(layer)
 
     @staticmethod
     def _shape_qkv(x: torch.Tensor, num_heads: int, head_dim: int) -> torch.Tensor:
@@ -91,8 +103,6 @@ class GPT2AttentionSoftmaxApprox(GPT2Attention):
 
         present = (key, value) if use_cache else None
 
-        # (Batch, Heads, T_query, Dim)
-        # Tensor 연산 최적화를 위해 여기서 Shape 확보
         query_layer = query
         key_layer = key
         value_layer = value
@@ -100,36 +110,11 @@ class GPT2AttentionSoftmaxApprox(GPT2Attention):
         B, H, Tq, Dh = query_layer.shape
         Tk = key_layer.shape[2]
 
-        # 3. Score 계산 (Matrix Multiplication - PyTorch Native)
-        # (B, H, Tq, Dh) @ (B, H, Dh, Tk) -> (B, H, Tq, Tk)
+        # 3. Score 계산
         attn_weights = torch.matmul(query_layer, key_layer.transpose(-1, -2))
         attn_weights = attn_weights / (float(Dh) ** 0.5)
 
-        # 4. Causal Mask 적용
-        # GPT2Attention 원본 로직 참조 (triu 사용)
-        if Tq > 1 or Tk > 1:  # 일반적인 경우
-            # causal mask 생성
-            bias = torch.tril(
-                torch.ones((Tk, Tk), dtype=torch.uint8, device=attn_weights.device)
-            ).view(1, 1, Tk, Tk)
-            # 현재 윈도우에 맞게 슬라이싱
-            # query 길이만큼, key 길이만큼
-            # causal: 미래 토큰 마스킹
-            # (GPT2 구현상 bias는 register buffer지만 여기선 간단히 생성)
-
-            # 간단한 Causal Masking:
-            # i > j (과거) 허용, i < j (미래) 마스킹
-            # 실제로는 attention_mask가 들어오므로 그것과 결합됨.
-            # 하지만 generation 단계에서는 past_key_value가 있으므로
-            # Tq=1 일 때는 마스킹 불필요 (항상 과거만 보므로)
-            pass
-
-        # transformers의 GPT2 모델은 내부적으로 `bias` 버퍼를 이용해 causal masking을 합니다.
-        # 여기서는 직접 구현 대신 attention_mask와 결합하여 처리하거나
-        # 간단히 상삼각 행렬 마스킹을 수행합니다.
-
-        # Generation 중(Tq=1)에는 Causal Mask 불필요 (이미 과거 Key만 존재)
-        # Prompt Forward 중(Tq > 1)에는 Causal Mask 필요
+        # 4. Causal Mask (Prompt에서는 필요, Generation(Tq=1)에서는 불필요)
         if Tq > 1:
             causal_mask = torch.triu(
                 torch.ones((Tq, Tk), dtype=torch.bool, device=attn_weights.device),
@@ -137,18 +122,13 @@ class GPT2AttentionSoftmaxApprox(GPT2Attention):
             )
             attn_weights.masked_fill_(causal_mask[None, None, :, :], self.pad_value)
 
-        # 5. Attention Mask (Padding) 적용
+        # 5. Attention Mask (Padding)
         if attention_mask is not None:
-            # attention_mask: (B, 1, 1, Tk) 형태라고 가정 (transformers 표준)
-            # 만약 (B, Tk)라면 차원 확장 필요
             if attention_mask.dim() == 2:
                 _mask = attention_mask[:, None, None, :]
             else:
                 _mask = attention_mask
 
-            # mask가 0인 부분에 pad_value 적용
-            # (transformers는 보통 1.0(keep), 0.0(mask)을 쓰거나 0, -inf를 씀)
-            # 여기서는 값이 0이면 마스킹이라 가정
             attn_weights = torch.where(
                 _mask > 0,
                 attn_weights,
@@ -157,61 +137,61 @@ class GPT2AttentionSoftmaxApprox(GPT2Attention):
                 ),
             )
 
-        # 6. Softmax (PyTorch Native - 매우 빠름)
+        # 6. Softmax (SW, fast)
         attn_probs = F.softmax(attn_weights, dim=-1)
 
         # ==========================================================
-        # 🚀 [HW Hybrid Logic] Row 0만 바꿔치기 (필요시에만 NumPy 변환)
+        # 🚀 [HW Hybrid Logic] "선택된 1개 레이어"에서만 HW softmax 적용
+        #     - row_idx = Tq - 1 (현재 토큰 row)
+        #     - head는 전체 유지 (요청대로)
         # ==========================================================
         if self.ser is not None:
-            # HW 연산이 필요한 경우에만 CPU/NumPy로 데이터 이동
-            # (Batch loop 대신 Batch=0만 처리한다고 가정하거나 Loop)
+            this_layer_idx = getattr(self, "layer_idx", None)
 
-            # 성능을 위해 Batch 처리는 생략하고 B=0에 대해서만 HW 적용 예시
-            # (데모용으로는 충분)
-            b_idx = 0
+            apply_hw = True
+            if self.hw_only_one_layer:
+                apply_hw = (this_layer_idx is not None) and (
+                    int(this_layer_idx) == int(self.hw_layer)
+                )
 
-            # Row 0의 Score 가져오기 (Tensor) -> (H, Tk)
-            # Tq의 0번째 인덱스 (Prompt의 첫 토큰 or Gen의 현재 토큰)
-            row0_scores_tensor = attn_weights[b_idx, :, 0, :]
+            if apply_hw and Tq >= 1:
+                b_idx = 0
+                row_idx = Tq - 1  # ✅ 현재 토큰 row (prompt: 마지막 토큰, gen: 0)
 
-            # CPU로 이동 (작은 데이터라 빠름)
-            row0_scores_np = row0_scores_tensor.detach().cpu().numpy()  # (H, Tk)
+                # (H, Tk) 가져와서 한 번만 CPU로 이동
+                row_scores_tensor = attn_weights[b_idx, :, row_idx, :]  # (H, Tk)
+                row_scores_np = row_scores_tensor.detach().cpu().numpy()
 
-            # HW 결과를 담을 배열
-            hw_probs_np = np.zeros_like(row0_scores_np)
+                hw_probs_np = np.zeros_like(row_scores_np)
 
-            # Head별로 HW 요청
-            for h in range(H):
-                try:
-                    # UART 전송
-                    hw_out = softmax_fpga_variable(
-                        self.ser,
-                        row0_scores_np[h],
-                        pad_value=self.pad_value,
-                        deadline_s=2.0,  # HW 타임아웃
-                    )
-                    hw_probs_np[h] = hw_out
-                except Exception:
-                    # 실패 시 SW값(이미 계산됨) 사용을 위해 0으로 두지 않고
-                    # 기존 PyTorch softmax 값을 가져옴
-                    fallback = attn_probs[b_idx, h, 0, :].detach().cpu().numpy()
-                    hw_probs_np[h] = fallback
+                for h in range(H):
+                    try:
+                        hw_out = softmax_fpga_variable(
+                            self.ser,
+                            row_scores_np[h],
+                            pad_value=self.pad_value,
+                            deadline_s=2.0,
+                        )
+                        hw_probs_np[h] = hw_out
+                    except Exception:
+                        # fallback: SW softmax 결과
+                        fallback = (
+                            attn_probs[b_idx, h, row_idx, :].detach().cpu().numpy()
+                        )
+                        hw_probs_np[h] = fallback
 
-            # 결과를 다시 텐서로 변환하여 덮어쓰기
-            hw_probs_tensor = (
-                torch.from_numpy(hw_probs_np)
-                .to(attn_probs.device)
-                .type(attn_probs.dtype)
-            )
-            attn_probs[b_idx, :, 0, :] = hw_probs_tensor
+                hw_probs_tensor = (
+                    torch.from_numpy(hw_probs_np)
+                    .to(attn_probs.device)
+                    .type(attn_probs.dtype)
+                )
+                attn_probs[b_idx, :, row_idx, :] = hw_probs_tensor
 
         # 7. Dropout & Weighted Sum
         attn_probs = self.attn_dropout(attn_probs)
         attn_output = torch.matmul(attn_probs, value_layer)  # (B, H, Tq, Dh)
 
         # 8. Heatmap 저장 (Target Layer/Head만)
-        # 여기서만 NumPy 변환 발생 (저장용)
         this_layer_idx = getattr(self, "layer_idx", None)
         store_this = (
             want_attn
@@ -221,15 +201,9 @@ class GPT2AttentionSoftmaxApprox(GPT2Attention):
         )
 
         if store_this:
-            # (B, H, Tq, Tk) -> (Tq, Tk) (Batch=0, Target Head)
             target_head = self.store_head
             saved_map = attn_probs[0, target_head, :, :].detach().cpu().numpy()
             self.last_attn = saved_map.astype(np.float64)
-        else:
-            if not getattr(self, "store_only", False) and want_attn:
-                # store_only가 꺼져있고 want_attn이면 전체 저장 (기존 호환)
-                # 메모리 낭비 가능성 있음
-                pass
 
         # 9. Output Format (B, Tq, H*Dh)
         attn_output = attn_output.permute(0, 2, 1, 3).contiguous()
@@ -265,14 +239,12 @@ def clear_serial_from_model(model: torch.nn.Module):
 
 
 def get_last_attention_matrix(model, layer=0, head=0):
-    # 저장된 last_attn 가져오기
     layer = max(0, min(int(layer), len(model.transformer.h) - 1))
     attn_mod = model.transformer.h[layer].attn
 
     if hasattr(attn_mod, "last_attn") and attn_mod.last_attn is not None:
         return attn_mod.last_attn
 
-    # 없으면 더미 리턴
     return np.zeros((1, 1), dtype=np.float64)
 
 

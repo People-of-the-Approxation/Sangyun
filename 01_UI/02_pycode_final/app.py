@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 
 import ui_main_page
 import ui_gpt_page as ui
-import ui_bert_page  # ✅ BERT 결과 페이지(ui_bert_page.py)
+import ui_bert_page
 import verify
 
 # =========================
@@ -32,17 +32,14 @@ ATTN_STORE = {}
 app = FastAPI()
 
 # static 폴더 서빙 (CSS/이미지)
-# project/static/style.css
-# project/static/images/chip_icon.png
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
 # =========================
-# UI Page (ONLY ONE)
+# UI Page
 # =========================
 @app.get("/", response_class=HTMLResponse)
 def root():
-    # 별도 main page 제거: 기존 UI로 바로 보내기
     return RedirectResponse(url="/attention_ui")
 
 
@@ -52,7 +49,6 @@ def attention_ui(
     port: str = DEFAULT_PORT,
     mode: str = "hw",
 ):
-    # 기존 UI 그대로: model 토글 포함
     return HTMLResponse(
         ui_main_page.render_page1(
             model=model,
@@ -65,26 +61,51 @@ def attention_ui(
 # =========================
 # Helpers
 # =========================
-def _run_gpt_demo(text: str, port: str, baud: int):
+def _run_gpt_demo(
+    text: str,
+    port: str,
+    baud: int,
+    *,
+    mode: str,
+    layer: int,
+    head: int,
+    max_new_tokens: int = 30,
+):
     """
-    verify.py의 GPT 데모 함수 호출.
+    verify.py의 run_gpt_demo 호출.
     기대 반환: (sw_text, hw_text, attn_np, hw_error_str_or_None)
-    """
-    candidates = [
-        "run_gpt_demo",
-        "gpt_demo",
-        "compute_gpt_all",
-        "compute_gpt_demo",
-    ]
-    for fn_name in candidates:
-        if hasattr(verify, fn_name):
-            fn = getattr(verify, fn_name)
-            return fn(text=text, port=port, baud=baud)
 
-    raise RuntimeError(
-        "GPT mode selected, but verify.py does not provide a GPT demo function.\n"
-        "Expected one of: run_gpt_demo / gpt_demo / compute_gpt_all / compute_gpt_demo\n"
-        "Please add a function that returns (sw_text, hw_text, attn_np, hw_error_or_None)."
+    - mode == "sw": HW(UART) 시도 없이 SW만 보여주는 동작을 원하지만,
+      verify.run_gpt_demo 내부에서 HW 실패 시 자동 fallback 하도록 작성되어 있으면
+      여기서는 동일 호출로 처리 가능.
+      (단, UX 개선을 위해 mode=sw일 때는 port open 시도 자체를 막는 것을 권장.)
+    """
+    mode = (mode or "hw").lower().strip()
+    if mode not in ("sw", "hw", "auto"):
+        mode = "hw"
+
+    if not hasattr(verify, "run_gpt_demo"):
+        raise RuntimeError(
+            "GPT mode selected, but verify.py does not provide run_gpt_demo().\n"
+            "Please implement run_gpt_demo(text, port, baud, hw_layer, hw_head, max_new_tokens)"
+        )
+
+    # ✅ mode가 sw이면 port가 잘못돼도 HW 시도 자체를 안 하도록 '가짜 포트'를 넘기기보단,
+    # verify.run_gpt_demo가 sw-only를 지원하는 게 가장 깔끔함.
+    # 현재는 verify.run_gpt_demo가 HW 실패 시 SW로 마무리하도록 작성되었다는 전제하에,
+    # 동일 호출로 진행하되, mode=sw면 아래에서 port를 빈 문자열로 넘겨 HW open 실패를 빠르게 유도할 수 있음.
+    if mode == "sw":
+        # HW 시도를 원천 차단(권장): verify.run_gpt_demo가 sw-only를 지원하면 더 좋음.
+        # 여기서는 port=""로 빠르게 실패시키고 SW fallback을 사용하게 함.
+        port = ""
+
+    return verify.run_gpt_demo(
+        text=text,
+        port=port,
+        baud=int(baud),
+        hw_layer=int(layer),
+        hw_head=int(head),
+        max_new_tokens=int(max_new_tokens),
     )
 
 
@@ -103,20 +124,30 @@ def attention_generate(
     baud: int = Form(DEFAULT_BAUD),
 ):
     model = (model or "gpt").lower().strip()
+    mode = (mode or "hw").lower().strip()
+    if mode not in ("sw", "hw", "auto"):
+        mode = "hw"
 
     # -----------------------------
-    # 1) GPT: generation result page (ui.py)
+    # 1) GPT: generation result page (ui_gpt_page.py)
     # -----------------------------
     if model == "gpt":
         try:
             sw_text, hw_text, attn_np, hw_err = _run_gpt_demo(
-                text=text, port=port, baud=int(baud)
+                text=text,
+                port=port,
+                baud=int(baud),
+                mode=mode,
+                layer=int(layer),
+                head=int(head),
+                max_new_tokens=30,
             )
         except Exception as e:
             sw_text, hw_text = "", ""
             attn_np = np.zeros((1, 1), dtype=np.float32)
             hw_err = str(e)
 
+        # ui_gpt_page.py 안에 반드시 import numpy as np 있어야 함
         heatmap_b64 = ui._attn_to_png_base64(np.asarray(attn_np, dtype=np.float32))
 
         return HTMLResponse(
@@ -130,12 +161,8 @@ def attention_generate(
         )
 
     # -----------------------------
-    # 2) BERT: classification + match + heatmap page
+    # 2) BERT: classification + match + heatmap page (그대로)
     # -----------------------------
-    mode = (mode or "hw").lower().strip()
-    if mode not in ("sw", "hw", "auto"):
-        mode = "hw"
-
     pred_sw = None
     pred_sw_err = None
     try:
@@ -153,7 +180,7 @@ def attention_generate(
 
     if mode == "sw":
         tokens, attn, _pred = verify.compute_sw_all(
-            text, layer=layer, head=head, max_len=int(max_len)
+            text, layer=int(layer), head=int(head), max_len=int(max_len)
         )
         used_mode = "sw"
 
@@ -161,8 +188,8 @@ def attention_generate(
         try:
             tokens, attn, pred_hw = verify.compute_hw_all(
                 text,
-                layer=layer,
-                head=head,
+                layer=int(layer),
+                head=int(head),
                 max_len=int(max_len),
                 port=port,
                 baud=int(baud),
@@ -172,7 +199,7 @@ def attention_generate(
             pred_hw_err = str(e)
             # HW 강제 모드에서 HW 실패하면 SW heatmap이라도 보여주기
             tokens, attn, _pred = verify.compute_sw_all(
-                text, layer=layer, head=head, max_len=int(max_len)
+                text, layer=int(layer), head=int(head), max_len=int(max_len)
             )
             used_mode = "sw"
             auto_fallback_err = pred_hw_err
@@ -182,8 +209,8 @@ def attention_generate(
         try:
             tokens, attn, pred_hw = verify.compute_hw_all(
                 text,
-                layer=layer,
-                head=head,
+                layer=int(layer),
+                head=int(head),
                 max_len=int(max_len),
                 port=port,
                 baud=int(baud),
@@ -192,7 +219,7 @@ def attention_generate(
         except Exception as e:
             auto_fallback_err = str(e)
             tokens, attn, _pred = verify.compute_sw_all(
-                text, layer=layer, head=head, max_len=int(max_len)
+                text, layer=int(layer), head=int(head), max_len=int(max_len)
             )
             used_mode = "sw"
 
@@ -301,8 +328,8 @@ def attn_heatmap_png(id: str):
     ]
 
     light_cmap = LinearSegmentedColormap.from_list("light_part", base_colors[:5])
-    light_colors = [mcolors.to_hex(light_cmap(i / 6)) for i in range(7)]  # 7
-    dark_colors = base_colors[5:]  # 5
+    light_colors = [mcolors.to_hex(light_cmap(i / 6)) for i in range(7)]
+    dark_colors = base_colors[5:]
     colors_12 = light_colors + dark_colors
 
     bounds = np.linspace(0.0, 1.0, len(colors_12) + 1)
