@@ -41,9 +41,9 @@ def render_page1(
                 ></textarea>
 
                 <!-- hidden 파라미터 -->
-                <input type="hidden" name="layer" value="6" />
-                <input type="hidden" name="head" value="6" />
-                <input type="hidden" name="max_len" value="512" />
+                <input type="hidden" name="layer" value="0" />
+                <input type="hidden" name="head" value="0" />
+                <input type="hidden" name="max_len" value="768" />
                 <input type="hidden" name="baud" value="115200" />
               </div>
 

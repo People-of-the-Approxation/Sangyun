@@ -1,21 +1,15 @@
 from typing import Optional, Tuple
+import serial
 import torch
 import numpy as np
 import datasets
 from transformers import BertTokenizer, BertForSequenceClassification
 from transformers.models.bert.modeling_bert import BertSelfAttention
-from Attention_approx import attention
-import UART_base
+from attention_approx import attention
+from softmax_batch import open_serial, close_serial
 
 
-# =========================
-# Custom Self-Attention (HW softmax)
-# =========================
 class BertSelfAttentionSoftmaxApprox(BertSelfAttention):
-    """
-    FPGA(UART)로 softmax를 계산하는 attention 구현.
-    웹 UI의 compute_hw_all에서 호출됩니다.
-    """
 
     def __init__(self, config, position_embedding_type=None):
         super().__init__(config, position_embedding_type=position_embedding_type)
@@ -34,7 +28,7 @@ class BertSelfAttentionSoftmaxApprox(BertSelfAttention):
         encoder_attention_mask: Optional[torch.Tensor] = None,
         past_key_value: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         output_attentions: bool = False,
-        **kwargs,  # [중요] transformers 버전 호환성 (past_key_values 등 수용)
+        **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
 
         if self.ser is None:
@@ -61,7 +55,6 @@ class BertSelfAttentionSoftmaxApprox(BertSelfAttention):
         B, H, T, Dh = query_layer.shape
         out = torch.zeros_like(query_layer)
 
-        # 마스크 처리 (필요시 사용)
         mask_np = None
         if attention_mask is not None:
             mask = attention_mask.squeeze(1).squeeze(1)
@@ -78,31 +71,15 @@ class BertSelfAttentionSoftmaxApprox(BertSelfAttention):
                 K_np = key_layer[b, h].detach().cpu().numpy()
                 V_np = value_layer[b, h].detach().cpu().numpy()
 
-                # 마스크가 있을 경우 처리 (간단하게 0 처리 예시)
-                # 실제로는 -inf 등으로 처리되지만 여기선 HW 특성에 맞김
-                # (Attention_approx.py가 이를 받아서 처리)
-
-                # FPGA Attention 호출 (return_attn=True로 매트릭스 받아옴)
-                out_np, attn_np = attention(
-                    Q_np, K_np, V_np, self.ser, return_attn=True
+                out_np = attention(
+                    Q_np, K_np, V_np, self.ser, pad_value=-32.0, timeout_s=2.0
                 )
-
                 out[b, h] = torch.tensor(
                     out_np, dtype=query_layer.dtype, device=query_layer.device
                 )
 
-                if output_attentions:
-                    self.last_attn[b, h, :, :] = attn_np
-
         context_layer = out.transpose(1, 2).contiguous().view(B, T, H * Dh)
-
-        # transformers 규약에 맞춰 반환
         return context_layer, None
-
-
-# =========================
-# Model Utility Functions
-# =========================
 
 
 def replace_self_attention(model: BertForSequenceClassification, NewSAClass):
@@ -128,16 +105,18 @@ def get_last_attention_matrix(model, layer=0, head=0):
     if not hasattr(sa, "last_attn") or sa.last_attn is None:
         return None
 
-    attn = sa.last_attn  # (B, H, T, T)
+    attn = sa.last_attn
     H = attn.shape[1]
     head = max(0, min(head, H - 1))
 
-    return attn[0, head]  # Batch 0번의 특정 Head 반환
+    return attn[0, head]
 
 
-def build_models_sst2(device="cpu"):
+def build_model_BERT(ser: serial.Serial):
+    device = "cpu"
+
+    print(f"Loading BERT model for SST-2...")
     tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
-
     baseline_model = (
         BertForSequenceClassification.from_pretrained(
             "textattack/bert-base-uncased-SST-2"
@@ -145,7 +124,6 @@ def build_models_sst2(device="cpu"):
         .to(device)
         .eval()
     )
-
     approx_model = (
         BertForSequenceClassification.from_pretrained(
             "textattack/bert-base-uncased-SST-2"
@@ -153,7 +131,73 @@ def build_models_sst2(device="cpu"):
         .to(device)
         .eval()
     )
+    replace_self_attention(approx_model, BertSelfAttentionSoftmaxApprox)
+    set_serial_to_model(approx_model, ser)
 
+    return tokenizer, baseline_model, approx_model, device
+
+
+def evaluate_SST2():
+    ser = open_serial("COM3", baud=115200, timeout=1.0)
+    dataset = datasets.load_dataset("glue", "sst2", split="validation")
+    tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+
+    baseline_model = BertForSequenceClassification.from_pretrained(
+        "textattack/bert-base-uncased-SST-2"
+    ).eval()
+
+    approx_model = BertForSequenceClassification.from_pretrained(
+        "textattack/bert-base-uncased-SST-2"
+    ).eval()
     replace_self_attention(approx_model, BertSelfAttentionSoftmaxApprox)
 
-    return tokenizer, baseline_model, approx_model
+    set_serial_to_model(approx_model, ser)
+    correct_baseline = 0
+    correct_approx = 0
+    match_count_approx = 0
+
+    lengths = []
+
+    for i, item in enumerate(dataset):
+        inputs = tokenizer(item["sentence"], return_tensors="pt", truncation=True)
+        label = item["label"]
+
+        L = inputs["input_ids"].shape[-1]
+        lengths.append(L)
+
+        with torch.no_grad():
+            out_base = baseline_model(**inputs).logits
+            out_approx = approx_model(**inputs).logits
+
+        pred_base = out_base.argmax(dim=-1).item()
+        pred_approx = out_approx.argmax(dim=-1).item()
+
+        if pred_base == label:
+            correct_baseline += 1
+        if pred_approx == label:
+            correct_approx += 1
+        if pred_base == pred_approx:
+            match_count_approx += 1
+
+        same_approx = "O" if pred_base == pred_approx else "X"
+
+        print(
+            f"[{i:3d}] L={L:3d}  Base:{pred_base}  Approx:{pred_approx}  Label:{label}  Match {same_approx}"
+        )
+
+    total = len(dataset)
+    print("\nEvaluation Results :")
+    print(
+        f"Baseline BERT Accuracy : {correct_baseline/total*100:.2f}% ({correct_baseline}/{total})"
+    )
+    print(
+        f"Approx BERT Accuracy   : {correct_approx/total*100:.2f}% ({correct_approx}/{total})"
+    )
+    print(
+        f"Prediction Match Rate   : {match_count_approx/total*100:.2f}% ({match_count_approx}/{total})"
+    )
+    close_serial(ser)
+
+
+if __name__ == "__main__":
+    evaluate_SST2()
