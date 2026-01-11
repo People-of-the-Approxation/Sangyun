@@ -9,7 +9,7 @@
   font-style: normal;
 }
 
-/* Define the 'KoPubDotum' font family (likely for Korean text) */
+/* Define the 'KoPubDotum' font family */
 @font-face {
   font-family: 'KoPubDotum';
   src: url('/static/fonts/KoPubWorld_Dotum_Pro_Medium.otf') format('opentype');
@@ -24,66 +24,61 @@
   --bg: #ffffff;      /* Background color (white) */
 }
 
-/* Apply border-box sizing to all elements for easier sizing */
-/* (Padding and border are included in the element's total width/height) */
+/* Apply border-box sizing */
 * { box-sizing: border-box; }
 
 /* Set up full height for the page */
 html, body {
-  height: 100%;       /* Fill the viewport height */
-  margin: 0;          /* Remove default browser margin */
-  padding: 0;         /* Remove default browser padding */
+  height: 100%;       
+  margin: 0;          
+  padding: 0;         
   background: var(--bg);
   color: var(--text);
-  font-family: 'Satoshi', Arial, sans-serif; /* Default font stack */
+  font-family: 'Satoshi', Arial, sans-serif;
 }
 
-/* Center the content vertically and horizontally on the screen */
+/* Center the content */
 body {
   display: flex;
-  justify-content: center; /* Center horizontally */
-  align-items: center;     /* Center vertically */
+  justify-content: center; 
+  align-items: center;     
 }
 
-/* Main container for the page content */
+/* Main container */
 .page {
-  /* Width is 1400px or 92% of the viewport, whichever is smaller */
   width: min(1400px, 92vw); 
-  margin: 0 auto;  /* Center the container horizontally */
+  margin: 0 auto;  
   padding: 0;
-  transform: translateY(20px); /* Move the page down slightly for visual balance */
+  transform: translateY(20px); 
 }
 
 /* Big title styling */
 .hero-title {
   font-size: 96px;
   font-weight: 500;
-  letter-spacing: -1px;     /* Tighten letter spacing slightly */
-  color: var(--primary);    /* Use the orange variable */
-  margin: 0 0 22px 0;       /* Margin: Top 0, Right 0, Bottom 22px, Left 0 */
+  letter-spacing: -1px;    
+  color: var(--primary);    
+  margin: 0 0 22px 0;      
 }
 
-/* Wrapper for the input area to add top spacing */
+/* Wrapper for the input area */
 .input-wrap { margin-top: 6px; }
 
 /* ================= The Orange Input Box ================= */
 .input-frame {
   width: 100%;
-  border: 4px solid var(--primary); /* Thick orange border */
-  border-radius: 8px;               /* Rounded corners */
+  border: 4px solid var(--primary);
+  border-radius: 8px;              
 
-  /* Use Grid layout to split the box: Input | Line | Icon */
   display: grid;
-  grid-template-columns: 1fr 4px 160px; /* 1fr (flexible) | 4px (divider) | 160px (icon area) */
+  grid-template-columns: 1fr 4px 160px; 
 
-  height: 160px;    /* Fixed height for the box */
-  overflow: hidden; /* Hide anything that goes outside the border */
+  height: 160px;    
+  overflow: hidden; 
 }
 
 /* Left side: Text Input Area */
 .input-left {
-  /* Padding: Top 25px, Right 24px, Bottom 0, Left 24px */
-  /* Top padding is 25px to push the text down visually */
   padding: 25px 24px 0 24px; 
   height: 100%;
 }
@@ -93,33 +88,30 @@ body {
   font-family: 'KoPubDotum', sans-serif;
   font-size: 35px;
   font-weight: 500;
-  color: #7A7A7A;       /* Grey color */
-  margin: 0 0 6px 0;    /* Bottom margin for spacing */
+  color: #7A7A7A;       
+  margin: 0 0 6px 0;    
 }
 
 /* The actual text input field */
 .textarea {
   width: 100%;
-  border: none;      /* Remove default border */
-  outline: none;     /* Remove focus outline (blue glow) */
-  resize: none;      /* Disable manual resizing handle */
+  border: none;      
+  outline: none;     
+  resize: none;      
 
   font-family: 'KoPubDotum', sans-serif;
   font-size: 35px;
   font-weight: 500;
   line-height: 1.2;
 
-  background: transparent; /* Transparent background */
-
-  /* Ensure it can take up space */
+  background: transparent; 
   min-height: 0;
 }
 
-/* Placeholder text styling */
 .textarea::placeholder {
   font-family: 'KoPubDotum', sans-serif;
   font-weight: 500;
-  color: #9C9C9C; /* Lighter grey for placeholder */
+  color: #9C9C9C; 
 }
 
 /* The vertical orange line separator */
@@ -130,8 +122,8 @@ body {
 /* Right side: Icon Button Area */
 .input-right {
   display: flex;
-  align-items: center;      /* Center content vertically */
-  justify-content: center;  /* Center content horizontally */
+  align-items: center;      
+  justify-content: center;  
   padding: 0;
 }
 
@@ -139,9 +131,9 @@ body {
 .icon-btn {
   width: 100%;
   height: 100%;
-  background: none;  /* No background */
-  border: none;      /* No border */
-  cursor: pointer;   /* Show pointer hand on hover */
+  background: none;  
+  border: none;      
+  cursor: pointer;   
   padding: 0;
 
   display: flex;
@@ -149,32 +141,29 @@ body {
   justify-content: center;
 }
 
-/* Hover effect for the button */
 .icon-btn:hover {
-  transform: scale(1.02); /* Slightly enlarge the button */
+  transform: scale(1.02); 
 }
 
-/* The image inside the button */
 .chip-icon {
-  width: 80%;           /* Take up 80% of the container width */
-  height: 80%;          /* Take up 80% of the container height */
-  object-fit: contain;  /* Keep aspect ratio, ensure image fits inside */
-  display: block;       /* Remove default inline image spacing */
+  width: 80%;           
+  height: 80%;          
+  object-fit: contain;  
+  display: block;       
 }
 
 /* ================= Controls Below the Box ================= */
 .control-under {
   width: 100%;
   display: flex;
-  justify-content: flex-end; /* Align items to the right side */
-  margin-top: 10px;          /* Space above this section */
+  justify-content: flex-end; 
+  margin-top: 10px;          
 }
 
-/* Each row of controls (Label + Input) */
 .control-row {
   display: flex;
-  align-items: center; /* Center items vertically */
-  gap: 12px;           /* Space between label and input */
+  align-items: center; 
+  gap: 12px;           
 
   color: #A4A4A4;
   font-size: 14px;
@@ -182,22 +171,71 @@ body {
   font-family: 'Satoshi', Arial, sans-serif;
 }
 
-/* Styling for labels inside control row */
 .control-row label {
   color: #A4A4A4;
   font-weight: 500;
   font-family: 'Satoshi', Arial, sans-serif;
 }
 
-/* Styling for dropdowns (select) and text inputs */
 .control-row select,
 .control-row input {
   color: #A4A4A4;
-  border: 1px solid #A4A4A4; /* Thin grey border */
-  background: transparent;   /* Transparent background */
+  border: 1px solid #A4A4A4; 
+  background: transparent;   
 
   padding: 4px 6px;
   font-size: 14px;
   font-weight: 500;
   font-family: 'Satoshi', Arial, sans-serif;
+}
+
+/* ========================================================
+   [NEW] Loading Overlay Styles
+   ======================================================== */
+
+/* 전체 화면을 덮는 오버레이 */
+.loading-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background-color: rgba(255, 255, 255, 0.95); /* 배경을 조금 더 불투명하게 */
+  z-index: 9999;
+  
+  display: none; /* JS에서 flex로 변경됨 */
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: 25px;
+}
+
+/* 스피너 애니메이션 */
+.spinner {
+  width: 60px;
+  height: 60px;
+  border: 5px solid #eaeaea; 
+  border-top: 5px solid var(--primary); /* 오렌지색 회전 부분 */
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+/* 텍스트 애니메이션 */
+.loading-text {
+  font-family: 'Satoshi', sans-serif;
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--primary);
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0% { opacity: 0.5; }
+  50% { opacity: 1; }
+  100% { opacity: 0.5; }
 }

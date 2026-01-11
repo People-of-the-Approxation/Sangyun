@@ -11,6 +11,7 @@ def render_page1(
     mode = (mode or "hw").lower()
 
     return f"""
+    <!DOCTYPE html>
     <html>
       <head>
         <meta charset="utf-8" />
@@ -20,11 +21,15 @@ def render_page1(
       </head>
 
       <body>
-        <div class="page">
+        <div id="loading-overlay" class="loading-overlay">
+            <div class="spinner"></div>
+            <div class="loading-text">Generating...</div>
+        </div>
 
+        <div class="page">
           <div class="hero-title">Chip Name blablabla</div>
 
-          <form class="input-wrap" method="post" action="/attention_generate">
+          <form id="run-form" class="input-wrap" method="post" action="/attention_generate">
 
             <div class="input-frame">
               <div class="input-left">
@@ -40,7 +45,6 @@ def render_page1(
                   spellcheck="false"
                 ></textarea>
 
-                <!-- hidden 파라미터 -->
                 <input type="hidden" name="layer" value="0" />
                 <input type="hidden" name="head" value="0" />
                 <input type="hidden" name="max_len" value="768" />
@@ -49,7 +53,6 @@ def render_page1(
 
               <div class="input-divider"></div>
 
-              <!-- 아이콘 = RUN -->
               <div class="input-right">
                 <button type="submit" class="icon-btn" aria-label="Run">
                   <img
@@ -83,6 +86,18 @@ def render_page1(
 
           </form>
         </div>
+
+        <script>
+          const form = document.getElementById('run-form');
+          const overlay = document.getElementById('loading-overlay');
+
+          if (form) {{
+              form.addEventListener('submit', function() {{
+                  // 버튼을 누르면 로딩 화면을 보이게 설정 (flex)
+                  overlay.style.display = 'flex';
+              }});
+          }}
+        </script>
       </body>
     </html>
     """
