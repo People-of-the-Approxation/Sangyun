@@ -1,145 +1,139 @@
 import torch
-import torch.nn as nn
 import numpy as np
-import copy
-from transformers import GPT2LMHeadModel, GPT2Tokenizer
+import serial
+import time
+from typing import Optional, Tuple
+from transformers import GPT2Tokenizer, GPT2LMHeadModel
 from transformers.models.gpt2.modeling_gpt2 import GPT2Attention
+from softmax_batch import open_serial, close_serial, softmax_batch
 
-# [수정] 없는 클래스 import를 제거하고, softmax_batch 함수를 직접 가져옵니다.
-from softmax_batch import softmax_batch
+
+SERIAL_PORT = "COM3"
+BAUD_RATE = 115200
 
 
 class GPT2AttentionSoftmaxApprox(GPT2Attention):
-    """
-    GPT2Attention의 _attn 메서드를 오버라이딩하여,
-    Softmax 연산을 하드웨어(시리얼)를 통해 수행하고
-    그 결과(Heatmap)를 저장하는 클래스입니다.
-    """
 
     def __init__(self, config, is_cross_attention=False, layer_idx=None):
-        super().__init__(
-            config, is_cross_attention=is_cross_attention, layer_idx=layer_idx
-        )
-        self.config = config
-        self.ser = getattr(config, "ser", None)
+        super().__init__(config, is_cross_attention, layer_idx)
+        self.ser = None
 
-        # 시각화를 위해 마지막 Attention Weights를 저장할 변수
-        self.last_attn = None
+    def set_serial(self, ser):
+        self.ser = ser
 
-    def _attn(self, query, key, value, attention_mask=None, head_mask=None):
-        # 1. Q * K^T 연산 (기존 GPT-2 로직)
+    def _my_split_heads(self, tensor, num_heads, attn_head_size):
+        new_shape = tensor.size()[:-1] + (num_heads, attn_head_size)
+        tensor = tensor.view(new_shape)
+        return tensor.permute(0, 2, 1, 3)
+
+    def _my_merge_heads(self, tensor, num_heads, attn_head_size):
+        tensor = tensor.permute(0, 2, 1, 3).contiguous()
+        new_shape = tensor.size()[:-2] + (num_heads * attn_head_size,)
+        return tensor.view(new_shape)
+
+    def forward(
+        self,
+        hidden_states: Optional[Tuple[torch.FloatTensor]],
+        layer_past: Optional[Tuple[torch.Tensor]] = None,
+        attention_mask: Optional[torch.FloatTensor] = None,
+        head_mask: Optional[torch.FloatTensor] = None,
+        encoder_hidden_states: Optional[torch.Tensor] = None,
+        encoder_attention_mask: Optional[torch.FloatTensor] = None,
+        use_cache: Optional[bool] = False,
+        output_attentions: Optional[bool] = False,
+        **kwargs,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+
+        if self.ser is None:
+            raise RuntimeError("UART serial is not set. Call set_serial(ser).")
+
+        query, key, value = self.c_attn(hidden_states).split(self.split_size, dim=2)
+
+        query = self._my_split_heads(query, self.num_heads, self.head_dim)
+        key = self._my_split_heads(key, self.num_heads, self.head_dim)
+        value = self._my_split_heads(value, self.num_heads, self.head_dim)
+
         attn_weights = torch.matmul(query, key.transpose(-1, -2))
 
         if self.scale_attn_weights:
-            attn_weights = attn_weights / (float(value.size(-1)) ** 0.5)
+            attn_weights = attn_weights / (value.size(-1) ** 0.5)
 
-        if self.is_cross_attention and self.layer_idx is None:
-            raise ValueError("Layer index must be set for cross-attention")
+        query_length, key_length = query.size(-2), key.size(-2)
+        causal_mask = self.bias[
+            :, :, key_length - query_length : key_length, :key_length
+        ]
+
+        mask_value = torch.finfo(attn_weights.dtype).min
+        attn_weights = torch.where(
+            causal_mask.bool(),
+            attn_weights,
+            torch.tensor(mask_value).to(attn_weights.device),
+        )
 
         if attention_mask is not None:
             attn_weights = attn_weights + attention_mask
 
-        # ============================================================
-        # [핵심 수정] Softmax 교체 로직
-        # ============================================================
+        B, H, Tq, Tk = attn_weights.shape
+        attn_weights_cpu = attn_weights.detach().cpu().numpy()
 
-        # 하드웨어 근사 모드가 켜져 있고, 시리얼 포트가 연결되어 있을 때
-        if getattr(self.config, "use_approx", False) and self.ser is not None:
-            # attn_weights shape: (Batch, Num_Heads, Seq_Len, Seq_Len)
-            B, H, T, _ = attn_weights.shape
+        attn_probs = torch.zeros_like(attn_weights)
 
-            # 1) 텐서를 Numpy(CPU)로 변환 및 펼치기
-            # 시리얼 통신 효율을 위해 (Batch * Heads * Seq_Len)개의 행 벡터 리스트로 만듭니다.
-            logits_np = attn_weights.detach().cpu().numpy()
-            rows_list = [row for row in logits_np.reshape(-1, T)]
+        for b in range(B):
+            for h in range(H):
+                matrix = attn_weights_cpu[b, h]
+                rows_list = [matrix[i, :] for i in range(Tq)]
 
-            try:
-                # 2) 시리얼 통신으로 하드웨어 Softmax 수행
-                # 타임아웃을 넉넉하게 줍니다 (행렬이 크면 시간이 걸릴 수 있음)
                 probs_list = softmax_batch(
-                    self.ser, rows_list, pad_value=-32.0, timeout_s=10.0
+                    self.ser, rows_list, pad_value=-32.0, timeout_s=5.0
                 )
 
-                # 3) 결과를 다시 텐서 형태로 복원
-                probs_flat = np.vstack(probs_list)
-                attn_weights = torch.tensor(
-                    probs_flat.reshape(B, H, T, T),
-                    dtype=query.dtype,
-                    device=query.device,
+                probs_matrix = np.vstack(probs_list)
+                attn_probs[b, h] = torch.tensor(
+                    probs_matrix, dtype=attn_weights.dtype, device=attn_weights.device
                 )
-            except Exception as e:
-                print(f"[HW Error in Layer {self.layer_idx}] {e}")
-                # 하드웨어 통신 에러 시, 소프트웨어 Softmax로 대체(Fallback)
-                attn_weights = nn.functional.softmax(attn_weights, dim=-1)
 
-        # 기본 소프트웨어 Softmax (Baseline)
-        else:
-            attn_weights = nn.functional.softmax(attn_weights, dim=-1)
-        # ============================================================
+        attn_probs = self.attn_dropout(attn_probs)
 
-        # [시각화용] 계산된 Attention Weights 저장
-        self.last_attn = attn_weights.detach().cpu()
+        attn_output = torch.matmul(attn_probs, value)
 
-        # Dropout 및 Head Mask 적용 (기존 로직)
-        attn_weights = self.attn_dropout(attn_weights)
+        attn_output = self._my_merge_heads(attn_output, self.num_heads, self.head_dim)
 
-        if head_mask is not None:
-            attn_weights = attn_weights * head_mask
+        attn_output = self.c_proj(attn_output)
+        attn_output = self.resid_dropout(attn_output)
 
-        attn_output = torch.matmul(attn_weights, value)
-        return attn_output, attn_weights
+        present = (key, value) if use_cache else None
+
+        return attn_output, present
 
 
-def replace_gpt2_attention(model, config_updates):
-    """
-    모델 내의 모든 GPT2Attention 모듈을 커스텀 모듈로 교체합니다.
-    """
-    for name, module in model.named_modules():
-        if isinstance(module, GPT2Attention):
-            parent_name = name.rsplit(".", 1)[0] if "." in name else ""
-            if parent_name:
-                parent = dict(model.named_modules())[parent_name]
-                child_name = name.split(".")[-1]
-            else:
-                parent = model
-                child_name = name
+def replace_gpt2_attention(model: GPT2LMHeadModel, ser_instance):
+    count = 0
+    for i, layer in enumerate(model.transformer.h):
+        old_attn = layer.attn
+        new_attn = GPT2AttentionSoftmaxApprox(
+            model.config,
+            is_cross_attention=old_attn.is_cross_attention,
+            layer_idx=old_attn.layer_idx,
+        )
+        new_attn.load_state_dict(old_attn.state_dict(), strict=True)
+        new_attn.set_serial(ser_instance)
 
-            config = copy.deepcopy(module.config)
-            for k, v in config_updates.items():
-                setattr(config, k, v)
-
-            new_module = GPT2AttentionSoftmaxApprox(
-                config=config,
-                is_cross_attention=module.is_cross_attention,
-                layer_idx=module.layer_idx,
-            )
-
-            new_module.load_state_dict(module.state_dict(), strict=False)
-            new_module.to(next(module.parameters()).device)
-
-            setattr(parent, child_name, new_module)
-
-    print(f"Replaced Attention layers with HW-Approx version.")
+        layer.attn = new_attn
+        count += 1
+    print(f"Replaced {count} attention layers with Hardware-Approximated version.")
 
 
-def build_model_GPT2(ser=None, model_name="gpt2"):
-    print(f"[Init] Loading {model_name} tokenizer & baseline model...")
+def build_model_GPT2(ser: serial.Serial):
+    device = "cpu"
+    model_name = "gpt2"
+
+    print(f"Loading {model_name} model...")
     tokenizer = GPT2Tokenizer.from_pretrained(model_name)
     tokenizer.pad_token = tokenizer.eos_token
 
-    base_model = GPT2LMHeadModel.from_pretrained(model_name)
-    approx_model = copy.deepcopy(base_model)
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"[Init] Moving models to device: {device}")
-    base_model.to(device).eval()
-    approx_model.to(device).eval()
-
-    config_updates = {"use_approx": True, "ser": ser}
-
-    print("[Init] Replacing Attention modules...")
-    replace_gpt2_attention(approx_model, config_updates)
-
+    base_model = GPT2LMHeadModel.from_pretrained(model_name).to(device).eval()
+    approx_model = GPT2LMHeadModel.from_pretrained(model_name).to(device).eval()
+    replace_gpt2_attention(approx_model, ser)
     return tokenizer, base_model, approx_model, device
 
 
